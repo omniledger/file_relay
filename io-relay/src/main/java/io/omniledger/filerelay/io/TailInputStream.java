@@ -1,14 +1,12 @@
 package io.omniledger.filerelay.io;
 
 import io.omniledger.filerelay.FileService;
+import io.omniledger.filerelay.ThrowingSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 
 /**
  * A lot like a {@link java.io.FileInputStream}.
@@ -56,60 +54,114 @@ public class TailInputStream extends InputStream {
         this.timeout = timeout;
     }
 
-
     @Override
     public int read() throws IOException {
-        return fileInputStream.read();
+        int result =
+            blockUntilDataAvailable(
+                    () -> {
+                        assert fileInputStream.available() > 0;
+                        int r = fileInputStream.read();
+                        assert r != -1;
+                        return r;
+                    }
+            );
+
+        return result;
     }
 
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
-        int available = super.available();
+        int result =
+            blockUntilDataAvailable(
+                () -> {
+                    assert fileInputStream.available() > 0;
+                    int r = fileInputStream.read(b, off, len);
+                    assert r != -1;
+                    return r;
+                }
+            );
+
+        return result;
+    }
+
+    private int blockUntilDataAvailable(ThrowingSupplier<IOException, Integer> r) throws IOException {
+        int available = fileInputStream.available();
         if(available > 0) {
             if(LOGGER.isTraceEnabled()) {
                 LOGGER.trace("Reading {} bytes from file {}", available, file);
             }
-            readSoFar += available;
-            return super.read(b, off, len);
+            Integer result = r.get();
+            assert result != null && result != -1 : result;
+            readSoFar += result;
+            return result;
         }
 
-        if(LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Zero bytes available in file, waiting for appends {}", file);
-        }
+        CountDownLatch latch = new CountDownLatch(1);
 
-        // nothing available, block
-        CompletableFuture<Void> readFuture = new CompletableFuture<>();
+        // nothing available, register listener
+        fileService.onFileChange(file.toPath(), latch::countDown);
 
-        Runnable listener = () -> readFuture.complete(null);
-        fileService.onFileChange(file.toPath(), listener);
-
-        // refresh underlying FIS
+        /*
+        * We need to retry reading stuff from the file, since data might have
+        * arrived in it between last checking it and now. Since input-streams in-between
+        * might have already decided that the file was finished, we need to recycle them
+        * first
+        * */
         refreshInputStream();
         available = fileInputStream.available();
+
+        // if it now has available bytes, return
         if(available > 0) {
-            // finish future just to be nice
-            readFuture.complete(null);
-            return super.read(b, off, len);
+            if(LOGGER.isTraceEnabled()) {
+                LOGGER.trace(
+                        "{} bytes of data arrived between polling file {} and registering listener",
+                        available,
+                        file
+                );
+            }
+            Integer result = r.get();
+            assert result != null && result != -1 : result;
+            readSoFar += result;
+            return result;
         }
         else {
             try {
-                readFuture.get(timeout, TimeUnit.MILLISECONDS);
-                refreshInputStream();
-
-                // normal future finish, read again
-                return read(b, off, len);
-            } catch (InterruptedException | ExecutionException e) {
-                // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
-                throw new RuntimeException(e);
-            } catch (TimeoutException e) {
                 if(LOGGER.isTraceEnabled()) {
-                    LOGGER.trace("Timed out waiting for file {} to be appended after {} ms", file, timeout);
+                    LOGGER.trace("Entering wait-state for data on file {}", file);
                 }
 
-                // if this was a timeout, we haven't received new bytes in the time, return 0
-                return 0;
+                // otherwise wait for signal from latch
+                if(!latch.await(timeout, TimeUnit.MILLISECONDS)) {
+                    if(LOGGER.isTraceEnabled()) {
+                        LOGGER.trace("Timed out waiting for file {} to be appended after {} ms", file, timeout);
+                    }
+                    // if this was a timeout, we haven't received new bytes in the time, return 0
+                    return 0;
+                }
+
+                // refresh inputstream, since it might have been marked as finished when we checked "available"
+                refreshInputStream();
+
+                // we were woken up normally, but the value is not available on the new stream yet, try again
+                if(fileInputStream.available() == 0) {
+                    LOGGER.warn("No data available after file-service notification, trying again");
+                    return blockUntilDataAvailable(r);
+                }
+
+                // normal future finish, read again
+                Integer result = r.get();
+                assert result != null && result != -1 : result;
+                readSoFar += result;
+                return result;
+            } catch (InterruptedException e) {
+                // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
+                throw new RuntimeException(e);
             }
         }
+    }
+
+    private void blockUntilDataAvailable() {
+
     }
 
     private void refreshInputStream() throws IOException {

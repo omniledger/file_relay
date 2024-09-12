@@ -45,7 +45,7 @@ public class FileServiceExtension implements BeforeEachCallback, AfterEachCallba
 
 	@Override
 	public void afterAll(ExtensionContext extensionContext) throws Exception {
-		FileUtils.forceDeleteFiles(TEST_PATH);
+		FileUtils.forceDeleteFiles(basePath.toFile().getAbsolutePath());
 	}
 
 	public Path basePath() {

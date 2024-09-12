@@ -32,7 +32,7 @@ public class FileServiceExtension implements BeforeEachCallback, AfterEachCallba
 		Files.createDirectories(basePath);
 
 		testFuture = new CompletableFuture<>();
-		fileService = new FileService(testFuture::completeExceptionally);
+		fileService = new FileService((t,e) -> testFuture.completeExceptionally(e));
 	}
 
 	@Override

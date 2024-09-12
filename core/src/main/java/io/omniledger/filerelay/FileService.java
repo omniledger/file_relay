@@ -24,7 +24,7 @@ public class FileService implements Runnable, Closeable {
     private static final Logger LOGGER = LoggerFactory.getLogger(FileService.class);
 
     private final WatchService watchService;
-    private final Consumer<Throwable> onError;
+    private final Thread.UncaughtExceptionHandler onError;
     private final ReentrantLock lock;
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
 
@@ -38,7 +38,10 @@ public class FileService implements Runnable, Closeable {
     private final Thread processingThread;
     private final Condition eventsCondition;
 
-    public FileService(Consumer<Throwable> onError) throws IOException, InterruptedException {
+    /**
+     * @throws IOException if the WatchService couldn't be instantiated.
+     * */
+    public FileService(Thread.UncaughtExceptionHandler onError) throws IOException {
         this.watchService = FileSystems.getDefault().newWatchService();
         this.onError = onError;
         this.lock = new ReentrantLock();
@@ -48,12 +51,12 @@ public class FileService implements Runnable, Closeable {
 
         this.processingThread = Thread.ofVirtual().unstarted(this::processEvents);
         processingThread.setName("fileservice-process");
-        processingThread.setUncaughtExceptionHandler( (t,e) -> onError.accept(e) );
+        processingThread.setUncaughtExceptionHandler(onError);
         processingThread.start();
 
         this.thread = Thread.ofVirtual().unstarted(this);
         thread.setName("fileservice-listener");
-        thread.setUncaughtExceptionHandler((t, e) -> onError.accept(e) );
+        thread.setUncaughtExceptionHandler(onError);
         thread.start();
     }
 
@@ -138,7 +141,7 @@ public class FileService implements Runnable, Closeable {
                 eventsCondition.signal();
             } catch (InterruptedException e) {
                 LOGGER.error("Error running file-service", e);
-                onError.accept(e);
+                onError.uncaughtException(this.thread, e);
                 break;
             } finally {
                 lock.unlock();
@@ -167,7 +170,8 @@ public class FileService implements Runnable, Closeable {
                 modifyCallbacks = new HashMap<>(fileModifyCallbacks);
                 eventsPerDirectory.clear();
             } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+                onError.uncaughtException(this.processingThread, e);
+                return;
             } finally {
                 lock.unlock();
             }

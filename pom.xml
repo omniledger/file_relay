@@ -8,10 +8,8 @@
     <modules>
         <module>core</module>
         <module>io-relay</module>
-        <module>http-relay</module>
         <!--
-                <module>datarepo</module>
-                <module>client</module>
+        <module>http-relay</module>
         -->
     </modules>
 
@@ -76,6 +74,7 @@
                     </includes>
                 </configuration>
                 <executions>
+                    <!--
                     <execution>
                         <id>attach-sources</id>
                         <phase>verify</phase>
@@ -83,6 +82,7 @@
                             <goal>jar-no-fork</goal>
                         </goals>
                     </execution>
+                    -->
                     <execution>
                         <goals>
                             <goal>integration-test</goal>

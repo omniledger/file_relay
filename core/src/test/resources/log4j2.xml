@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="error" shutdownHook="disable">
+
+    <Appenders>
+        <Console name="stdlogs" target="SYSTEM_OUT">
+            <PatternLayout pattern=" [%-20.20t] [%-6.6X{tracing_id}] [%d] %-5level %-40.40logger{36} - %msg%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <!-- Logs to console only by default, only logs our own messages in a file -->
+        <Root level="info">
+            <!-- don't log debug to STDOUT -->
+            <AppenderRef ref="stdlogs" level="trace" />
+        </Root>
+        <Logger name="io.omniledger.filerelay" level="trace"/>
+    </Loggers>
+</Configuration>

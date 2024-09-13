@@ -125,24 +125,49 @@ public class FileService implements Runnable, Closeable {
 
     private final Map<Path, List<WatchEvent<?>>> eventsPerDirectory = new HashMap<>();
 
+    private record PathEvents(Path path, List<WatchEvent<?>> events) {}
+
     @Override
     public void run() {
         while(!shouldStop.get()) {
+            List<PathEvents> eventsByPath = new ArrayList<>();
             try {
                 // check once every 200ms that the environment hasn't been killed yet
                 WatchKey watchKey = watchService.poll(200, TimeUnit.MILLISECONDS);
-                Path dir = (Path) watchKey.watchable();
-                List<WatchEvent<?>> events = watchKey.pollEvents();
-                watchKey.reset();
 
-                // we have things to do, get the global lock and queue the new events
-                lock.lock();
-                eventsPerDirectory.put(dir, events);
-                eventsCondition.signal();
-            } catch (InterruptedException e) {
+                // it was a timeout
+                if(watchKey == null) {
+                    continue;
+                }
+
+                do {
+                    Path dir = (Path) watchKey.watchable();
+                    var events = watchKey.pollEvents();
+                    eventsByPath.add(new PathEvents(dir, events));
+
+                    watchKey.reset();
+                }
+                while ((watchKey = watchService.poll()) != null);
+            }
+            catch (InterruptedException e) {
                 LOGGER.error("Error running file-service", e);
                 onError.uncaughtException(this.thread, e);
                 break;
+            }
+
+            try {
+                // we have things to do, get the global lock and queue the new events
+                lock.lock();
+                for(PathEvents events : eventsByPath) {
+                    List<WatchEvent<?>> list =
+                            eventsPerDirectory.computeIfAbsent(
+                                    events.path,
+                                    (v) -> new ArrayList<>()
+                            );
+
+                    list.addAll(events.events);
+                    eventsCondition.signal();
+                }
             } finally {
                 lock.unlock();
             }

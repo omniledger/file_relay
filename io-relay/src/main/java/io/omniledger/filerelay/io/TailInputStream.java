@@ -33,16 +33,6 @@ public class TailInputStream extends InputStream {
 
     public TailInputStream(
             FileService fileService,
-            String file,
-            long timeout
-    )
-    throws FileNotFoundException
-    {
-        this(fileService, new File(file), timeout);
-    }
-
-    public TailInputStream(
-            FileService fileService,
             File file,
             long timeout
     )
@@ -82,6 +72,11 @@ public class TailInputStream extends InputStream {
             );
 
         return result;
+    }
+
+    @Override
+    public int available() throws IOException {
+        return fileInputStream.available();
     }
 
     private int blockUntilDataAvailable(ThrowingSupplier<IOException, Integer> r) throws IOException {
@@ -136,7 +131,7 @@ public class TailInputStream extends InputStream {
                         LOGGER.trace("Timed out waiting for file {} to be appended after {} ms", file, timeout);
                     }
                     // if this was a timeout, we haven't received new bytes in the time, return 0
-                    return 0;
+                    throw new IOException(new TimeoutException("File-read timed out after " + timeout + " millis"));
                 }
 
                 // refresh inputstream, since it might have been marked as finished when we checked "available"

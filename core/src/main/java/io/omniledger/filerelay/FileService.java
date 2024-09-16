@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import static java.nio.file.StandardWatchEventKinds.ENTRY_CREATE;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY;
@@ -100,6 +101,10 @@ public class FileService implements Runnable, Closeable {
         }
     }
 
+    public boolean isRunning() {
+        return !this.shouldStop.get();
+    }
+
     public void close() {
         stop();
     }
@@ -178,7 +183,7 @@ public class FileService implements Runnable, Closeable {
         while(!shouldStop.get()) {
             HashMap<Path, List<WatchEvent<?>>> eventMap;
             Map<Path, List<Consumer<Path>>> createCallbacks;
-            HashMap<Path, List<Runnable>> modifyCallbacks;
+            Map<Path, List<Runnable>> modifyCallbacks;
 
             // clone full state, so that we don't need to block anyone else while processing
             lock.lock();
@@ -191,8 +196,8 @@ public class FileService implements Runnable, Closeable {
                 }
 
                 eventMap = new HashMap<>(eventsPerDirectory);
-                createCallbacks = new HashMap<>(fileCreateCallbacks);
-                modifyCallbacks = new HashMap<>(fileModifyCallbacks);
+                createCallbacks = cloneMultimapWithContainedList(fileCreateCallbacks);
+                modifyCallbacks = cloneMultimapWithContainedList(fileModifyCallbacks);
                 eventsPerDirectory.clear();
             } catch (InterruptedException e) {
                 onError.uncaughtException(this.processingThread, e);
@@ -244,5 +249,17 @@ public class FileService implements Runnable, Closeable {
                 }
             }
         }
+    }
+
+    private static <K,V> Map<K, List<V>> cloneMultimapWithContainedList(Map<K, List<V>> map) {
+        return map.entrySet()
+                    .stream()
+                    .collect(
+                            Collectors.toMap(
+                                    Map.Entry::getKey,
+                                    // clone list as new so that the list is immutable in this loop
+                                    l -> new ArrayList<>(l.getValue())
+                            )
+                    );
     }
 }

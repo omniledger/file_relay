@@ -125,13 +125,10 @@ public class TailInputStream extends InputStream {
                     LOGGER.trace("Entering wait-state for data on file {}", file);
                 }
 
-                // otherwise wait for signal from latch
-                if(!latch.await(timeout, TimeUnit.MILLISECONDS)) {
-                    if(LOGGER.isTraceEnabled()) {
-                        LOGGER.trace("Timed out waiting for file {} to be appended after {} ms", file, timeout);
-                    }
-                    // if this was a timeout, we haven't received new bytes in the time, return 0
-                    throw new IOException(new TimeoutException("File-read timed out after " + timeout + " millis"));
+                awaitTimeout(latch);
+
+                if(!fileService.isRunning()) {
+                    throw new IOException("File-service stopped");
                 }
 
                 // refresh inputstream, since it might have been marked as finished when we checked "available"
@@ -151,6 +148,43 @@ public class TailInputStream extends InputStream {
             } catch (InterruptedException e) {
                 // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
                 throw new RuntimeException(e);
+            }
+        }
+    }
+
+    /**
+     * Check if latch finishes in the expected time but also makes sure that thread
+     * doesn't block system shutdown.
+     * */
+    private void awaitTimeout(CountDownLatch latch) throws InterruptedException, IOException {
+        long started = System.currentTimeMillis();
+        while (fileService.isRunning()) {
+            // check on server once every 100ms at most
+            long elapsedSinceStart = System.currentTimeMillis() - started;
+            long remainingUntilTimeout = timeout - elapsedSinceStart;
+            long latchTimeout = Math.min(remainingUntilTimeout, 100);
+
+            // if latch is complete, we're good, condition fulfilled
+            if (latch.await(latchTimeout, TimeUnit.MILLISECONDS)) {
+                return;
+            }
+
+            // latch timed out, check if it's permanent
+            if(System.currentTimeMillis() >= started + timeout) {
+                if (LOGGER.isTraceEnabled()) {
+                    LOGGER.trace("Timed out waiting for file {} to be appended after {} ms", file, timeout);
+                }
+                // if this was a timeout, we haven't received new bytes in the time, return 0
+                throw new IOException(new TimeoutException("File-read: " + file + " timed out after " + timeout + " millis"));
+            }
+
+            if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace(
+                        "Woke up to check on server after {} ms, elapse {} ms timeout in {} ms",
+                        latchTimeout,
+                        System.currentTimeMillis() - started,
+                        timeout
+                );
             }
         }
     }

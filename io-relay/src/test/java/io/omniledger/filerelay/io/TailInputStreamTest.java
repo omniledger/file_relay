@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.*;
 
@@ -16,7 +17,7 @@ public class TailInputStreamTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TailInputStreamTest.class);
 
-    private static final int FILE_LENGTH = 1024;
+    private static final int FILE_LENGTH = 64 * 1024;
     private static final int READ_BUFFER_LENGTH = 64;
 
     @RegisterExtension
@@ -138,13 +139,18 @@ public class TailInputStreamTest {
     {
         int wrote = 0;
         byte[] bytes = new byte[READ_BUFFER_LENGTH];
+        ByteArrayOutputStream fileContents = new ByteArrayOutputStream(FILE_LENGTH);
 
         // event doesn't trigger until we close the outputstream, so yeah...
         while (wrote < FILE_LENGTH) {
             if(readFuture.isDone()) {
                 if(readFuture.isCompletedExceptionally()) {
                     try {
-                        readFuture.get();
+                        byte[] result  = readFuture.get();
+
+                        // compare results with the contents we wrote out
+                        Assertions.assertArrayEquals(fileContents.toByteArray(), result);
+
                         // we have an exception, it should have been thrown out on get
                         throw new IllegalStateException();
                     }
@@ -164,10 +170,16 @@ public class TailInputStreamTest {
             try(OutputStream oos = new FileOutputStream(appended, true)) {
                 // file should be fully written using the buffer multiple times
                 assert FILE_LENGTH % bytes.length == 0;
+
                 new Random().nextBytes(bytes);
+
+                fileContents.write(bytes);
+                fileContents.flush();
+
                 oos.write(bytes);
                 oos.flush();
                 oos.close();
+
                 wrote += bytes.length;
 
                 LOGGER.debug("Wrote bytes {}/{}", wrote, FILE_LENGTH);

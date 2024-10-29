@@ -18,13 +18,13 @@ public class TailInputStreamTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(TailInputStreamTest.class);
 
     private static final int FILE_LENGTH = 64 * 1024;
-    private static final int READ_BUFFER_LENGTH = 64;
+    private static final int READ_BUFFER_LENGTH = 512;
 
     @RegisterExtension
     static FileServiceExtension testContext = new FileServiceExtension();
 
     @RepeatedTest(10)
-    public void test() throws Exception {
+    public void test() throws Throwable {
         // context-path is cleaned up after each test anyway, so this doesn't litter
         File appended = newFile();
 
@@ -54,7 +54,6 @@ public class TailInputStreamTest {
 
         // read 10 more bytes than will be written
         CompletableFuture<byte[]> readFuture = readFileOnDifferentThread(inputStream, FILE_LENGTH + 10);
-        writeFileInSmallChunks(appended, readFuture);
 
         /*
          readFuture should time out eventually, write is sync, so already finished
@@ -63,22 +62,33 @@ public class TailInputStreamTest {
          exception in 3 seconds, it will be given here
          */
         try {
+            writeFileInSmallChunks(appended, readFuture);
             readFuture.get(10, TimeUnit.SECONDS);
             Assertions.fail("Should have received an execution-exception");
         }
         catch (ExecutionException e) {
-            if(
-                !(e.getCause() instanceof IOException)
-                || !(e.getCause().getCause() instanceof TimeoutException)
-            ) {
-                LOGGER.error("Invalid exception", e);
+            if(!(e.getCause() instanceof IOException)) {
                 Assertions.fail("Invalid exception " + e);
+                assertIOTimeout((IOException) e.getCause());
             }
+        }
+        catch (IOException e) {
+            assertIOTimeout(e);
+        }
+        catch (Throwable e) {
+            Assertions.fail("Expected either IOException or a packaging instance");
+        }
+    }
+
+    private void assertIOTimeout(IOException e) {
+        if(!(e.getCause() instanceof TimeoutException)) {
+            LOGGER.error("Invalid exception", e);
+            Assertions.fail("Invalid exception " + e);
         }
     }
 
     @Test
-    public void testStreamBasics() throws Exception {
+    public void testStreamBasics() throws Throwable {
         File file = newFile();
         CompletableFuture<byte[]> testFuture = new CompletableFuture<>();
         writeFileInSmallChunks(file, testFuture);
@@ -96,7 +106,7 @@ public class TailInputStreamTest {
      * automatically true, so tests can become flaky.
      * */
     @RepeatedTest(10)
-    public void testBuffered() throws Exception {
+    public void testBuffered() throws Throwable {
         File appended = newFile();
 
         InputStream inputStream =
@@ -120,43 +130,43 @@ public class TailInputStreamTest {
         return appended;
     }
 
-    private void writeAndReadFileFully(InputStream inputStream, File appended) throws IOException, InterruptedException, ExecutionException, TimeoutException {
-        CompletableFuture<byte[]> readFuture = readFileOnDifferentThread(inputStream);
+    private void writeAndReadFileFully(InputStream inputStream, File appended) throws Throwable{
+        CompletableFuture<byte[]> readFuture = readFileOnDifferentThread(inputStream, FILE_LENGTH);
 
-        writeFileInSmallChunks(appended, readFuture);
+        byte[] wrote = writeFileInSmallChunks(appended, readFuture);
         LOGGER.debug("Finished writing file {}", appended);
 
         // test that read-future completes once the whole buffer has been written out
-        readFuture.get(1, TimeUnit.SECONDS);
+        byte[] read = readFuture.get(1, TimeUnit.SECONDS);
+
+        // test that we received the  same file we wrote
+        Assertions.assertArrayEquals(wrote, read);
     }
 
 
-    private static void writeFileInSmallChunks(
+    private static byte[] writeFileInSmallChunks(
             File appended,
             CompletableFuture<byte[]> readFuture
     )
-    throws IOException
+    throws Throwable
     {
         int wrote = 0;
         byte[] bytes = new byte[READ_BUFFER_LENGTH];
         ByteArrayOutputStream fileContents = new ByteArrayOutputStream(FILE_LENGTH);
 
-        // event doesn't trigger until we close the outputstream, so yeah...
         while (wrote < FILE_LENGTH) {
+            // if future has been cancelled in the meantime, we should also give up
             if(readFuture.isDone()) {
                 if(readFuture.isCompletedExceptionally()) {
                     try {
-                        byte[] result  = readFuture.get();
-
-                        // compare results with the contents we wrote out
-                        Assertions.assertArrayEquals(fileContents.toByteArray(), result);
-
-                        // we have an exception, it should have been thrown out on get
-                        throw new IllegalStateException();
+                        readFuture.get();
                     }
-                    catch (ExecutionException | InterruptedException e) {
-                        throw new RuntimeException(e);
+                    catch (ExecutionException e) {
+                        throw e.getCause();
                     }
+
+                    // we have an exception, it should have been thrown out on get
+                    throw new IllegalStateException();
                 }
                 else {
                     Assertions.fail(
@@ -178,6 +188,8 @@ public class TailInputStreamTest {
 
                 oos.write(bytes);
                 oos.flush();
+
+                // event doesn't trigger until we close the outputstream
                 oos.close();
 
                 wrote += bytes.length;
@@ -185,10 +197,7 @@ public class TailInputStreamTest {
                 LOGGER.debug("Wrote bytes {}/{}", wrote, FILE_LENGTH);
             }
         }
-    }
-
-    private CompletableFuture<byte[]> readFileOnDifferentThread(InputStream inputStream) {
-        return readFileOnDifferentThread(inputStream, FILE_LENGTH);
+        return fileContents.toByteArray();
     }
 
     private CompletableFuture<byte[]> readFileOnDifferentThread(InputStream inputStream, int length) {

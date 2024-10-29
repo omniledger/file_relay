@@ -7,6 +7,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A lot like a {@link java.io.FileInputStream}.
@@ -30,6 +33,9 @@ public class TailInputStream extends InputStream {
     private final File file;
     private final long timeout;
     private int readSoFar = 0;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final AtomicReference<CountDownLatch> latchReference = new AtomicReference<>(null);
+    private final AtomicBoolean shouldTerminate = new AtomicBoolean(false);
 
     public TailInputStream(
             FileService fileService,
@@ -80,6 +86,8 @@ public class TailInputStream extends InputStream {
     }
 
     private int blockUntilDataAvailable(ThrowingSupplier<IOException, Integer> r) throws IOException {
+        testTerminate();
+
         int available = fileInputStream.available();
         if(available > 0) {
             if(LOGGER.isTraceEnabled()) {
@@ -91,64 +99,130 @@ public class TailInputStream extends InputStream {
             return result;
         }
 
-        CountDownLatch latch = new CountDownLatch(1);
+        try {
+            CountDownLatch latch;
+            lock.lock();
 
-        // nothing available, register listener
-        fileService.onFileChange(file.toPath(), latch::countDown);
-
-        /*
-        * We need to retry reading stuff from the file, since data might have
-        * arrived in it between last checking it and now. Since input-streams in-between
-        * might have already decided that the file was finished, we need to recycle them
-        * first
-        * */
-        refreshInputStream();
-        available = fileInputStream.available();
-
-        // if it now has available bytes, return
-        if(available > 0) {
-            if(LOGGER.isTraceEnabled()) {
-                LOGGER.trace(
-                        "{} bytes of data arrived between polling file {} and registering listener",
-                        available,
-                        file
-                );
-            }
-            Integer result = r.get();
-            assert result != null && result != -1 : result;
-            readSoFar += result;
-            return result;
-        }
-        else {
             try {
+                // latch-reference might already exist if it's a recursive call
+                // assert latchReference.get() == null;
                 if(LOGGER.isTraceEnabled()) {
-                    LOGGER.trace("Entering wait-state for data on file {}", file);
+                    LOGGER.trace("Setting latch");
                 }
+                /*
+                 we always replace the previous latch, as it might be dirty and it's only about
+                 this cycle anyway
+                 */
+                latchReference.set(latch = new CountDownLatch(1));
+            }
+            finally {
+                lock.unlock();
+            }
 
-                awaitTimeout(latch);
+            // nothing available, register listener
+            fileService.onFileChange(
+                    file.toPath(),
+                    () -> {
+                        lock.lock();
+                        try {
+                            latch.countDown();
+                        }
+                        finally {
+                            lock.unlock();
+                        }
+                    }
+                );
 
-                if(!fileService.isRunning()) {
-                    throw new IOException("File-service stopped");
+            /*
+             * We need to retry reading stuff from the file, since data might have
+             * arrived in it between last checking it and now. Since input-streams in-between
+             * might have already decided that the file was finished, we need to recycle them
+             * first
+             * */
+            refreshInputStream();
+            available = fileInputStream.available();
+
+            // if it now has available bytes, return
+            if (available > 0) {
+                if (LOGGER.isTraceEnabled()) {
+                    LOGGER.trace(
+                            "{} bytes of data arrived between polling file {} and registering listener",
+                            available,
+                            file
+                    );
                 }
-
-                // refresh inputstream, since it might have been marked as finished when we checked "available"
-                refreshInputStream();
-
-                // we were woken up normally, but the value is not available on the new stream yet, try again
-                if(fileInputStream.available() == 0) {
-                    LOGGER.warn("No data available after file-service notification, trying again");
-                    return blockUntilDataAvailable(r);
-                }
-
-                // normal future finish, read again
                 Integer result = r.get();
                 assert result != null && result != -1 : result;
                 readSoFar += result;
                 return result;
-            } catch (InterruptedException e) {
-                // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
-                throw new RuntimeException(e);
+            } else {
+                try {
+                    if (LOGGER.isTraceEnabled()) {
+                        LOGGER.trace("Entering wait-state for data on file {}", file);
+                    }
+
+                    awaitTimeout();
+
+                    if (!fileService.isRunning()) {
+                        throw new IOException("File-service stopped");
+                    }
+
+                    // refresh inputstream, since it might have been marked as finished when we checked "available"
+                    refreshInputStream();
+
+                    // we were woken up normally, but the value is not available on the new stream yet, try again
+                    if (fileInputStream.available() == 0) {
+                        LOGGER.warn("No data available after file-service notification, trying again");
+                        return blockUntilDataAvailable(r);
+                    }
+
+                    // normal future finish, read again
+                    Integer result = r.get();
+                    assert result != null && result != -1 : result;
+                    readSoFar += result;
+                    return result;
+                } catch (InterruptedException e) {
+                    // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
+                    throw new RuntimeException(e);
+                }
             }
+        }
+        finally {
+            lock.lock();
+            try {
+                if(LOGGER.isTraceEnabled()) {
+                    LOGGER.trace("Unsetting latch");
+                }
+
+                latchReference.set(null);
+            }
+            finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    private void testTerminate() throws IOException {
+        if(this.shouldTerminate.get())  {
+            throw new IOException("Terminating input-stream listening");
+        }
+    }
+
+    public void wakeAndTerminate() {
+        if(shouldTerminate.get()) {
+            LOGGER.warn("Already terminated");
+        }
+
+        lock.lock();
+        try {
+            shouldTerminate.set(true);
+            CountDownLatch latch = latchReference.get();
+            if(latch != null) {
+                latch.countDown();
+            }
+        }
+        finally {
+            lock.unlock();
         }
     }
 
@@ -156,7 +230,7 @@ public class TailInputStream extends InputStream {
      * Check if latch finishes in the expected time but also makes sure that thread
      * doesn't block system shutdown.
      * */
-    private void awaitTimeout(CountDownLatch latch) throws InterruptedException, IOException {
+    private void awaitTimeout() throws InterruptedException, IOException {
         long started = System.currentTimeMillis();
         while (fileService.isRunning()) {
             // check on server once every 100ms at most
@@ -164,10 +238,28 @@ public class TailInputStream extends InputStream {
             long remainingUntilTimeout = timeout - elapsedSinceStart;
             long latchTimeout = Math.min(remainingUntilTimeout, 100);
 
+            CountDownLatch latch;
+            try {
+                lock.lock();
+                latch = latchReference.get();
+
+                // if not empty, just carry on, latch will be managed as expected
+                if(latch == null) {
+                    LOGGER.warn("Reader terminated early?");
+                    return;
+                }
+            }
+            finally {
+                lock.unlock();
+            }
+
             // if latch is complete, we're good, condition fulfilled
-            if (latch.await(latchTimeout, TimeUnit.MILLISECONDS)) {
+            if (latch.await(latchTimeout, TimeUnit.MILLISECONDS) && !shouldTerminate.get()) {
                 return;
             }
+
+            // if it's a termination, drop everything
+            testTerminate();
 
             // latch timed out, check if it's permanent
             if(System.currentTimeMillis() >= started + timeout) {
@@ -187,10 +279,6 @@ public class TailInputStream extends InputStream {
                 );
             }
         }
-    }
-
-    private void blockUntilDataAvailable() {
-
     }
 
     private void refreshInputStream() throws IOException {

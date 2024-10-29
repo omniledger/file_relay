@@ -9,7 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
-import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.*;
 
@@ -22,6 +21,28 @@ public class TailInputStreamTest {
 
     @RegisterExtension
     static FileServiceExtension testContext = new FileServiceExtension();
+
+    @RepeatedTest(10)
+    public void testTermination() throws Throwable {
+        TailInputStream inputStream = new TailInputStream(testContext.fileService(), newFile(), 60_000);
+
+        CompletableFuture<byte[]> future = readFileOnDifferentThread(inputStream, FILE_LENGTH);
+        inputStream.wakeAndTerminate();
+
+        long startTime = System.currentTimeMillis();
+
+        // assert that it doesn't take 200 milliseconds for input-stream to stop blocking after termination
+        try {
+            future.get();
+        }
+        catch (Exception e) {
+            // expected
+            Assertions.assertInstanceOf(ExecutionException.class, e);
+            Assertions.assertInstanceOf(IOException.class, e.getCause());
+        }
+        long elapsed = System.currentTimeMillis() - startTime;
+        Assertions.assertTrue(elapsed < 200);
+    }
 
     @RepeatedTest(10)
     public void test() throws Throwable {
@@ -76,7 +97,7 @@ public class TailInputStreamTest {
             assertIOTimeout(e);
         }
         catch (Throwable e) {
-            Assertions.fail("Expected either IOException or a packaging instance");
+            Assertions.fail("Expected either IOException or a packaging instance", e);
         }
     }
 

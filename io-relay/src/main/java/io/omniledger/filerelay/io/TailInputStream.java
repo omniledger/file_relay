@@ -52,32 +52,12 @@ public class TailInputStream extends InputStream {
 
     @Override
     public int read() throws IOException {
-        int result =
-            blockUntilDataAvailable(
-                    () -> {
-                        assert fileInputStream.available() > 0;
-                        int r = fileInputStream.read();
-                        assert r != -1;
-                        return r;
-                    }
-            );
-
-        return result;
+        return blockUntilDataAvailable(() -> fileInputStream.read() );
     }
 
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
-        int result =
-            blockUntilDataAvailable(
-                () -> {
-                    assert fileInputStream.available() > 0;
-                    int r = fileInputStream.read(b, off, len);
-                    assert r != -1;
-                    return r;
-                }
-            );
-
-        return result;
+        return blockUntilDataAvailable( () -> fileInputStream.read(b, off, len) );
     }
 
     @Override
@@ -142,20 +122,8 @@ public class TailInputStream extends InputStream {
             refreshInputStream();
             available = fileInputStream.available();
 
-            // if it now has available bytes, return
-            if (available > 0) {
-                if (LOGGER.isTraceEnabled()) {
-                    LOGGER.trace(
-                            "{} bytes of data arrived between polling file {} and registering listener",
-                            available,
-                            file
-                    );
-                }
-                Integer result = r.get();
-                assert result != null && result != -1 : result;
-                readSoFar += result;
-                return result;
-            } else {
+            // if it has no available bytes, block
+            if (available == 0) {
                 try {
                     if (LOGGER.isTraceEnabled()) {
                         LOGGER.trace("Entering wait-state for data on file {}", file);
@@ -172,20 +140,27 @@ public class TailInputStream extends InputStream {
 
                     // we were woken up normally, but the value is not available on the new stream yet, try again
                     if (fileInputStream.available() == 0) {
-                        LOGGER.warn("No data available after file-service notification, trying again");
+                        if(LOGGER.isDebugEnabled()) {
+                            LOGGER.debug("No data available after file-service notification, trying again");
+                        }
                         return blockUntilDataAvailable(r);
                     }
-
-                    // normal future finish, read again
-                    Integer result = r.get();
-                    assert result != null && result != -1 : result;
-                    readSoFar += result;
-                    return result;
                 } catch (InterruptedException e) {
                     // if waiting was forcibly interrupted or there was an error in executing, nothing we can do
                     throw new RuntimeException(e);
                 }
+            } else if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace(
+                        "{} bytes of data arrived between polling file {} and registering listener",
+                        available,
+                        file
+                );
             }
+
+            Integer result = r.get();
+            assert result != null && result != -1 : result;
+            readSoFar += result;
+            return result;
         }
         finally {
             lock.lock();
@@ -282,8 +257,13 @@ public class TailInputStream extends InputStream {
     }
 
     private void refreshInputStream() throws IOException {
+        /*
         this.fileInputStream.close();
         this.fileInputStream = new FileInputStream(file);
-        fileInputStream.skip(readSoFar);
+        long skipped = 0;
+        while (skipped < readSoFar) {
+            skipped += fileInputStream.skip(readSoFar - skipped);
+        }
+         */
     }
 }

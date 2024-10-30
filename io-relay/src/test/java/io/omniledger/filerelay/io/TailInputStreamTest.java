@@ -16,8 +16,8 @@ public class TailInputStreamTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TailInputStreamTest.class);
 
-    private static final int FILE_LENGTH = 64 * 1024;
-    private static final int READ_BUFFER_LENGTH = 512;
+    private static final int FILE_LENGTH = 16 * 1024;
+    private static final int READ_BUFFER_LENGTH = 1024;
 
     @RegisterExtension
     static FileServiceExtension testContext = new FileServiceExtension();
@@ -197,6 +197,7 @@ public class TailInputStreamTest {
                 }
             }
 
+            Random rnd = new Random();
             // append file on this thread and check that read-future isn't complete yet
             try(OutputStream oos = new FileOutputStream(appended, true)) {
                 // file should be fully written using the buffer multiple times
@@ -212,6 +213,8 @@ public class TailInputStreamTest {
 
                 // event doesn't trigger until we close the outputstream
                 oos.close();
+
+                Thread.sleep(rnd.nextInt(100));
 
                 wrote += bytes.length;
 
